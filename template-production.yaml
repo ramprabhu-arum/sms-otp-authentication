@@ -1,0 +1,217 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: SMS OTP Authentication System - Production
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: nodejs20.x
+    MemorySize: 512
+    Environment:
+      Variables:
+        AWS_REGION: !Ref AWS::Region
+        DYNAMODB_SESSIONS_TABLE: sms-otp-sessions
+        DYNAMODB_OTP_RECORDS_TABLE: sms-otp-records
+        DYNAMODB_RATE_LIMITS_TABLE: sms-otp-rate-limits
+        DYNAMODB_AUDIT_LOGS_TABLE: sms-otp-audit-logs
+        SQS_SMS_DELIVERY_URL: !Ref SMSDeliveryQueue
+        OTP_EXPIRY_SECONDS: "600"
+        SESSION_EXPIRY_SECONDS: "600"
+        OTP_MAX_ATTEMPTS: "3"
+        RATE_LIMIT_PHONE_MAX: "5"
+        RATE_LIMIT_IP_MAX: "20"
+        RATE_LIMIT_WINDOW_SECONDS: "3600"
+
+Parameters:
+  TwilioAccountSid:
+    Type: String
+    Description: Twilio Account SID
+  TwilioAuthToken:
+    Type: String
+    NoEcho: true
+    Description: Twilio Auth Token
+  TwilioPhoneNumber:
+    Type: String
+    Description: Twilio Phone Number (E.164 format)
+  StaticQRAppId:
+    Type: String
+    Default: my-app
+    Description: Static QR App ID
+  StaticQRSecret:
+    Type: String
+    NoEcho: true
+    Default: dGhpc21zc3RhdGljc2VjcmV0
+    Description: Static QR Secret
+
+Resources:
+  # SQS Queue for SMS delivery
+  SMSDeliveryQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: sms-otp-sms-delivery-prod
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 345600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt SMSDeliveryDLQ.Arn
+        maxReceiveCount: 3
+
+  # Dead Letter Queue
+  SMSDeliveryDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: sms-otp-dlq-prod
+      MessageRetentionPeriod: 1209600
+
+  # IAM Role for Lambda Functions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: sms-otp-lambda-execution-role-sam
+      AssumeRolePolicyDocument:
+        Version: "2012-10-31"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: "2012-10-31"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/sms-otp-sessions"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/sms-otp-sessions/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/sms-otp-records"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/sms-otp-records/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/sms-otp-rate-limits"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/sms-otp-audit-logs"
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: "2012-10-31"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource:
+                  - !GetAtt SMSDeliveryQueue.Arn
+                  - !GetAtt SMSDeliveryDLQ.Arn
+
+  # Lambda Functions
+  ValidateQRFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: sms-otp-validate-qr-prod
+      CodeUri: dist/
+      Handler: lambdas/validate-qr.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          STATIC_QR_APP_ID: !Ref StaticQRAppId
+          STATIC_QR_SECRET: !Ref StaticQRSecret
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /validate-qr
+            Method: POST
+            RestApiId: !Ref ApiGateway
+
+  RequestOTPFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: sms-otp-request-otp-prod
+      CodeUri: dist/
+      Handler: lambdas/request-otp.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /request-otp
+            Method: POST
+            RestApiId: !Ref ApiGateway
+
+  VerifyOTPFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: sms-otp-verify-otp-prod
+      CodeUri: dist/
+      Handler: lambdas/verify-otp.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /verify-otp
+            Method: POST
+            RestApiId: !Ref ApiGateway
+
+  SMSSenderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: sms-otp-sms-sender-prod
+      CodeUri: dist/
+      Handler: lambdas/sms-sender.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          TWILIO_ACCOUNT_SID: !Ref TwilioAccountSid
+          TWILIO_AUTH_TOKEN: !Ref TwilioAuthToken
+          TWILIO_PHONE_NUMBER: !Ref TwilioPhoneNumber
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt SMSDeliveryQueue.Arn
+            BatchSize: 10
+
+  # API Gateway
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: sms-otp-api-prod
+      StageName: prod
+      Cors:
+        AllowMethods: "'POST, GET, OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/"
+    Export:
+      Name: SMSOTPApiUrl
+
+  ValidateQREndpoint:
+    Description: Validate QR endpoint
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/validate-qr"
+
+  RequestOTPEndpoint:
+    Description: Request OTP endpoint
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/request-otp"
+
+  VerifyOTPEndpoint:
+    Description: Verify OTP endpoint
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/verify-otp"
+
+  SQSQueueUrl:
+    Description: SQS Queue URL
+    Value: !Ref SMSDeliveryQueue
+
+  DLQUrl:
+    Description: Dead Letter Queue URL
+    Value: !Ref SMSDeliveryDLQ

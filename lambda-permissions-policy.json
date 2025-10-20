@@ -1,0 +1,42 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:DeleteItem",
+        "dynamodb:BatchGetItem",
+        "dynamodb:BatchWriteItem"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:*:*:table/sms-otp-sessions",
+        "arn:aws:dynamodb:*:*:table/sms-otp-sessions/index/*",
+        "arn:aws:dynamodb:*:*:table/sms-otp-records",
+        "arn:aws:dynamodb:*:*:table/sms-otp-records/index/*",
+        "arn:aws:dynamodb:*:*:table/sms-otp-rate-limits",
+        "arn:aws:dynamodb:*:*:table/sms-otp-audit-logs",
+        "arn:aws:dynamodb:*:*:table/sms-otp-audit-logs/index/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sqs:SendMessage",
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl"
+      ],
+      "Resource": [
+        "arn:aws:sqs:*:*:sms-otp-events",
+        "arn:aws:sqs:*:*:sms-otp-sms-delivery",
+        "arn:aws:sqs:*:*:sms-otp-dlq"
+      ]
+    }
+  ]
+}

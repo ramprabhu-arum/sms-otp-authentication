@@ -1,0 +1,158 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: SMS OTP Authentication System
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: nodejs20.x
+    MemorySize: 512
+    Environment:
+      Variables:
+        AWS_REGION: !Ref AWS::Region
+        DYNAMODB_SESSIONS_TABLE: !Ref SessionsTable
+        DYNAMODB_OTP_RECORDS_TABLE: !Ref OTPRecordsTable
+        DYNAMODB_RATE_LIMITS_TABLE: !Ref RateLimitsTable
+        DYNAMODB_AUDIT_LOGS_TABLE: !Ref AuditLogsTable
+        SQS_SMS_DELIVERY_URL: !Ref SMSDeliveryQueue
+        TWILIO_ACCOUNT_SID: !Ref TwilioAccountSid
+        TWILIO_AUTH_TOKEN: !Ref TwilioAuthToken
+        TWILIO_PHONE_NUMBER: !Ref TwilioPhoneNumber
+        STATIC_QR_APP_ID: !Ref StaticQRAppId
+        STATIC_QR_SECRET: !Ref StaticQRSecret
+
+Parameters:
+  TwilioAccountSid:
+    Type: String
+    Description: Twilio Account SID
+  TwilioAuthToken:
+    Type: String
+    NoEcho: true
+    Description: Twilio Auth Token
+  TwilioPhoneNumber:
+    Type: String
+    Description: Twilio Phone Number
+  StaticQRAppId:
+    Type: String
+    Default: my-app
+    Description: Static QR App ID
+  StaticQRSecret:
+    Type: String
+    NoEcho: true
+    Default: dGhpc21zc3RhdGljc2VjcmV0
+    Description: Static QR Secret
+
+Resources:
+  # DynamoDB Tables
+  SessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: sms-otp-sessions
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: sessionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sessionId
+          KeyType: HASH
+
+  OTPRecordsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: sms-otp-records
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: otpId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: otpId
+          KeyType: HASH
+
+  RateLimitsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: sms-otp-rate-limits
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: identifier
+          AttributeType: S
+      KeySchema:
+        - AttributeName: identifier
+          KeyType: HASH
+
+  AuditLogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: sms-otp-audit-logs
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: logId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: logId
+          KeyType: HASH
+
+  # SQS Queue
+  SMSDeliveryQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: sms-otp-sms-delivery
+      VisibilityTimeout: 60
+
+  # Lambda Functions
+  ValidateQRFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: sms-otp-validate-qr
+      CodeUri: dist/
+      Handler: lambdas/validate-qr.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /validate-qr
+            Method: POST
+
+  RequestOTPFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: sms-otp-request-otp
+      CodeUri: dist/
+      Handler: lambdas/request-otp.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /request-otp
+            Method: POST
+
+  VerifyOTPFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: sms-otp-verify-otp
+      CodeUri: dist/
+      Handler: lambdas/verify-otp.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /verify-otp
+            Method: POST
+
+  SMSSenderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: sms-otp-sms-sender
+      CodeUri: dist/
+      Handler: lambdas/sms-sender.handler
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt SMSDeliveryQueue.Arn
+            BatchSize: 10
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"

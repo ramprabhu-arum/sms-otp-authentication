@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Build outputs
+dist/
+.aws-sam/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# AWS
+samconfig.toml
+
+# Temporary files
+*.tmp
+*.temp
+gsi-update.json
+
+# Secrets (IMPORTANT - never commit these!)
+*.pem
+*.key
+credentials.json
