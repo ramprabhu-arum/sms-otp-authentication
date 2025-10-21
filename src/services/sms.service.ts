@@ -1,95 +1,173 @@
-// src/services/sms.service.ts
+import { SQSEvent } from "aws-lambda";
 import twilio from "twilio";
-import { Logger } from "../utils/logger";
+import { DebugLogger } from "../utils/debug-logger";
 import { updateOTPWithTwilioSid } from "./dynamodb.service";
 
-const logger = new Logger({ service: "SMSService" });
+const accountSid = process.env.TWILIO_ACCOUNT_SID;
+const authToken = process.env.TWILIO_AUTH_TOKEN;
+const fromNumber = process.env.TWILIO_PHONE_NUMBER;
 
-const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
+if (!accountSid || !authToken || !fromNumber) {
+  throw new Error("Missing required Twilio environment variables");
+}
+
+const twilioClient = twilio(accountSid, authToken);
+
+export interface SMSMessage {
+  phoneNumber: string;
+  otp: string; // ✅ Changed from 'message' to 'otp'
+  sessionId: string;
+}
 
 export interface SMSResult {
   success: boolean;
   messageId?: string;
-  status?: string;
   error?: string;
-  errorCode?: string;
 }
 
-/**
- * Send SMS via Twilio with proper error handling
- */
+// ✅ FIXED: Updated function signature to accept message text directly
 export async function sendSMS(
   phoneNumber: string,
-  otp: string,
-  otpId: string
+  messageText: string // ✅ Changed from 'otp' and 'otpId' to just 'messageText'
 ): Promise<SMSResult> {
+  const debugLog = new DebugLogger("sms.service");
+
   try {
-    logger.info("Sending SMS", { phoneNumber });
-
-    const message = await twilioClient.messages.create({
-      body: `Your verification code is: ${otp}. Valid for 10 minutes.`,
-      from: process.env.TWILIO_PHONE_NUMBER,
-      to: phoneNumber,
+    debugLog.logFlowStep(1, "Prepare Twilio API call", {
+      phoneNumber,
+      messageText,
+      messageLength: messageText.length,
+      fromNumber,
+      containsOTP: /\d{6}/.test(messageText),
     });
 
-    await updateOTPWithTwilioSid(otpId, message.sid);
-
-    // Check Twilio response status
-    logger.info("Twilio response received", {
-      messageId: message.sid,
-      status: message.status,
-      errorCode: message.errorCode,
-      errorMessage: message.errorMessage,
-    });
-
-    // Twilio statuses: queued, sending, sent, delivered, failed, undelivered
-    if (message.status === "failed" || message.status === "undelivered") {
-      logger.error(
-        "SMS delivery failed",
-        new Error(message.errorMessage || "Unknown error"),
+    // ✅ CRITICAL CHECK: Verify message text is not undefined
+    if (!messageText || messageText.includes("undefined")) {
+      debugLog.logError(
+        "Message text is invalid!",
+        new Error("Invalid message"),
         {
-          messageId: message.sid,
-          status: message.status,
-          errorCode: message.errorCode,
+          messageText,
           phoneNumber,
         }
       );
-
-      return {
-        success: false,
-        messageId: message.sid,
-        status: message.status,
-        error: message.errorMessage || "SMS delivery failed",
-        errorCode: message.errorCode?.toString(),
-      };
+      throw new Error(`Invalid message text: ${messageText}`);
     }
 
-    // Status is queued, sending, or sent - consider it successful
-    logger.info("SMS sent successfully", {
-      phoneNumber,
-      messageId: message.sid,
-      status: message.status,
+    debugLog.logServiceCall("Twilio", "messages.create", {
+      body: messageText,
+      from: fromNumber,
+      to: phoneNumber,
+      statusCallback: process.env.TWILIO_WEBHOOK_URL,
+    });
+
+    const result = await twilioClient.messages.create({
+      body: messageText,
+      from: fromNumber,
+      to: phoneNumber,
+      statusCallback: process.env.TWILIO_WEBHOOK_URL,
+    });
+
+    debugLog.logServiceResponse("Twilio", "messages.create", {
+      sid: result.sid,
+      status: result.status,
+      to: result.to,
+      from: result.from,
+    });
+
+    console.log(`SMS sent successfully. SID: ${result.sid}`);
+
+    debugLog.logFlowStep(2, "SMS sent successfully", {
+      twilioSid: result.sid,
+      status: result.status,
     });
 
     return {
       success: true,
-      messageId: message.sid,
-      status: message.status,
+      messageId: result.sid,
     };
   } catch (error: any) {
-    logger.error("Error sending SMS", error, { phoneNumber });
-
-    // Extract Twilio error details
-    const errorCode = error.code || error.status;
-    const errorMessage = error.message || "Failed to send SMS";
-
+    console.error("Error sending SMS:", error);
+    debugLog.logError("Twilio API error", error, {
+      phoneNumber,
+      messageText,
+      errorCode: error?.code,
+      errorMessage: error?.message,
+      errorDetails: error?.moreInfo,
+    });
     return {
       success: false,
-      error: errorMessage,
-      errorCode: errorCode?.toString(),
+      error: error.message || "Unknown error",
     };
+  }
+}
+
+// Class-based service (for future use)
+export class SMSService {
+  async sendSMS(
+    phoneNumber: string,
+    message: string,
+    sessionId?: string
+  ): Promise<string> {
+    const debugLog = new DebugLogger("SMSService");
+
+    try {
+      debugLog.logServiceCall("Twilio", "messages.create", {
+        phoneNumber,
+        messageLength: message.length,
+        sessionId,
+      });
+
+      const result = await twilioClient.messages.create({
+        body: message,
+        from: fromNumber,
+        to: phoneNumber,
+        statusCallback: process.env.TWILIO_WEBHOOK_URL,
+      });
+
+      debugLog.logServiceResponse("Twilio", "messages.create", {
+        sid: result.sid,
+        status: result.status,
+      });
+
+      console.log(`SMS sent successfully. SID: ${result.sid}`);
+
+      if (sessionId) {
+        await updateOTPWithTwilioSid(sessionId, result.sid);
+      }
+
+      return result.sid;
+    } catch (error: any) {
+      console.error("Error sending SMS:", error);
+      debugLog.logError("SMS send error", error);
+      throw error;
+    }
+  }
+
+  async processSQSMessages(event: SQSEvent): Promise<void> {
+    const debugLog = new DebugLogger("SMSService.processSQSMessages");
+
+    for (const record of event.Records) {
+      try {
+        debugLog.logSQSReceive("sms-queue", record.body);
+
+        const message: SMSMessage = JSON.parse(record.body);
+
+        debugLog.logData("Processing SQS message", {
+          phoneNumber: message.phoneNumber,
+          otp: message.otp,
+          sessionId: message.sessionId,
+        });
+
+        // Format the message with OTP
+        const smsText = `Your OTP code is: ${message.otp}. Valid for 5 minutes.`;
+
+        await this.sendSMS(message.phoneNumber, smsText, message.sessionId);
+      } catch (error: any) {
+        console.error("Error processing SQS message:", error);
+        debugLog.logError("SQS message processing error", error);
+        throw error;
+      }
+    }
   }
 }

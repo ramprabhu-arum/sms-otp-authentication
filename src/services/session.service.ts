@@ -1,118 +1,72 @@
-// src/services/session.service.ts
-import { OTP_CONFIG, Session, SessionStatus } from "../types";
-import { generateUUID } from "../utils/crypto";
-import { Logger } from "../utils/logger";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
-  createSession,
-  getSession,
-  updateSessionStatus,
-} from "./dynamodb.service";
+  DynamoDBDocumentClient,
+  PutCommand,
+  GetCommand,
+  UpdateCommand,
+} from "@aws-sdk/lib-dynamodb";
 
-const logger = new Logger({ service: "SessionService" });
+const client = new DynamoDBClient({
+  region: process.env.AWS_REGION || "us-west-2",
+});
+const docClient = DynamoDBDocumentClient.from(client);
 
-/**
- * Create a new authentication session
- */
-export async function createAuthSession(
-  phoneNumber: string,
-  appId: string,
-  clientSessionId?: string
-): Promise<Session> {
-  logger.info("Creating auth session", { phoneNumber, appId });
+const SESSIONS_TABLE = process.env.SESSIONS_TABLE || "sms-otp-sessions";
 
-  const sessionId = generateUUID();
-  const now = Date.now();
-  const expiryAt = now + OTP_CONFIG.SESSION_EXPIRY_SECONDS * 1000;
-
-  const session: Session = {
-    sessionId,
-    phoneNumber,
-    appId,
-    clientSessionId: clientSessionId || undefined,
-    status: SessionStatus.ACTIVE,
-    createdAt: now,
-    expiryAt,
-    attempts: 0,
-    lastActivityAt: now,
-  };
-
-  await createSession(session);
-
-  logger.info("Auth session created", { sessionId });
-
-  return session;
+export interface SessionData {
+  sessionId: string;
+  phoneNumber: string;
+  ipAddress: string;
+  appId: string;
+  createdAt?: string;
+  verified?: boolean;
+  authToken?: string;
 }
 
-/**
- * Validate session exists and is not expired/locked
- */
-export async function validateSession(sessionId: string): Promise<{
-  valid: boolean;
-  session?: Session;
-  reason?: string;
-}> {
-  logger.debug("Validating session", { sessionId });
-
-  const session = await getSession(sessionId);
-
-  if (!session) {
-    logger.warn("Session not found", { sessionId });
-    return { valid: false, reason: "SESSION_NOT_FOUND" };
-  }
-
-  // Check if expired
-  if (Date.now() > session.expiryAt) {
-    logger.warn("Session expired", { sessionId });
-    await updateSessionStatus(sessionId, SessionStatus.EXPIRED);
-    return { valid: false, reason: "SESSION_EXPIRED" };
-  }
-
-  // Check if locked
-  if (session.status === SessionStatus.LOCKED) {
-    logger.warn("Session locked", {
-      sessionId,
-      lockReason: session.lockReason,
+export class SessionService {
+  async createSession(data: SessionData): Promise<void> {
+    const command = new PutCommand({
+      TableName: SESSIONS_TABLE,
+      Item: {
+        sessionId: data.sessionId,
+        phoneNumber: data.phoneNumber,
+        ipAddress: data.ipAddress,
+        appId: data.appId,
+        createdAt: new Date().toISOString(),
+        verified: false,
+        ttl: Math.floor(Date.now() / 1000) + 3600, // 1 hour TTL
+      },
     });
-    return { valid: false, reason: "SESSION_LOCKED", session };
+
+    await docClient.send(command);
   }
 
-  // Check if already verified
-  if (session.status === SessionStatus.VERIFIED) {
-    logger.warn("Session already verified", { sessionId });
-    return { valid: false, reason: "SESSION_ALREADY_VERIFIED" };
+  async getSession(sessionId: string): Promise<SessionData | null> {
+    const command = new GetCommand({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionId },
+    });
+
+    const result = await docClient.send(command);
+    return result.Item as SessionData | null;
   }
 
-  return { valid: true, session };
-}
+  async markSessionAsVerified(
+    sessionId: string,
+    authToken: string
+  ): Promise<void> {
+    const command = new UpdateCommand({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionId },
+      UpdateExpression:
+        "SET verified = :verified, authToken = :authToken, verifiedAt = :verifiedAt",
+      ExpressionAttributeValues: {
+        ":verified": true,
+        ":authToken": authToken,
+        ":verifiedAt": new Date().toISOString(),
+      },
+    });
 
-/**
- * Validate phone number binding (CRITICAL SECURITY CHECK)
- */
-export function validatePhoneBinding(
-  session: Session,
-  providedPhoneNumber: string
-): boolean {
-  return session.phoneNumber === providedPhoneNumber;
-}
-
-/**
- * Lock session due to fraud detection
- */
-export async function lockSession(
-  sessionId: string,
-  reason: string
-): Promise<void> {
-  logger.warn("Locking session", { sessionId, reason });
-
-  await updateSessionStatus(sessionId, SessionStatus.LOCKED, {
-    lockedAt: Date.now(),
-    lockReason: reason,
-  });
-}
-
-/**
- * Check if max attempts exceeded
- */
-export function isMaxAttemptsExceeded(attempts: number): boolean {
-  return attempts >= OTP_CONFIG.OTP_MAX_ATTEMPTS;
+    await docClient.send(command);
+  }
 }

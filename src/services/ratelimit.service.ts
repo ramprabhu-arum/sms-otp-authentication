@@ -1,120 +1,125 @@
-// src/services/ratelimit.service.ts
-import { OTP_CONFIG, RateLimitResult } from "../types";
-import { Logger } from "../utils/logger";
-import { getRateLimit, upsertRateLimit } from "./dynamodb.service";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  UpdateCommand,
+} from "@aws-sdk/lib-dynamodb";
 
-const logger = new Logger({ service: "RateLimitService" });
+const client = new DynamoDBClient({
+  region: process.env.AWS_REGION || "us-west-2",
+});
+const docClient = DynamoDBDocumentClient.from(client);
 
-/**
- * Check and update rate limit for a given identifier
- */
-export async function checkRateLimit(
-  identifier: string,
-  maxRequests: number
-): Promise<RateLimitResult> {
-  logger.debug("Checking rate limit", { identifier });
+const RATE_LIMITS_TABLE =
+  process.env.RATE_LIMITS_TABLE || "sms-otp-rate-limits";
 
-  const now = Date.now();
-  const windowMs = OTP_CONFIG.RATE_LIMIT_WINDOW_SECONDS * 1000;
+const LIMITS = {
+  phone: { max: 5, windowSeconds: 3600 }, // 5 per hour
+  ip: { max: 20, windowSeconds: 3600 }, // 20 per hour
+};
 
-  // Get existing rate limit record
-  const existing = await getRateLimit(identifier);
-
-  if (!existing) {
-    // First request - create new record
-    await upsertRateLimit({
-      identifier,
-      count: 1,
-      windowStart: now,
-    });
-
-    logger.debug("Rate limit initialized", {
-      identifier,
-      remaining: maxRequests - 1,
-    });
-
-    return {
-      limited: false,
-      remaining: maxRequests - 1,
-      resetAt: now + windowMs,
-    };
-  }
-
-  // Check if window has expired
-  if (now - existing.windowStart > windowMs) {
-    // Reset window
-    await upsertRateLimit({
-      identifier,
-      count: 1,
-      windowStart: now,
-    });
-
-    logger.debug("Rate limit window reset", {
-      identifier,
-      remaining: maxRequests - 1,
-    });
-
-    return {
-      limited: false,
-      remaining: maxRequests - 1,
-      resetAt: now + windowMs,
-    };
-  }
-
-  // Within current window
-  const newCount = existing.count + 1;
-
-  if (newCount > maxRequests) {
-    // Rate limit exceeded
-    logger.warn("Rate limit exceeded", {
-      identifier,
-      count: newCount,
-      maxRequests,
-    });
-
-    return {
-      limited: true,
-      remaining: 0,
-      resetAt: existing.windowStart + windowMs,
-    };
-  }
-
-  // Update count
-  await upsertRateLimit({
-    identifier,
-    count: newCount,
-    windowStart: existing.windowStart,
-  });
-
-  logger.debug("Rate limit updated", {
-    identifier,
-    remaining: maxRequests - newCount,
-  });
-
-  return {
-    limited: false,
-    remaining: maxRequests - newCount,
-    resetAt: existing.windowStart + windowMs,
-  };
+export interface RateLimitResult {
+  allowed: boolean;
+  retryAfter?: number;
 }
 
-/**
- * Check rate limit for phone number
- */
-export async function checkPhoneRateLimit(
-  phoneNumber: string
-): Promise<RateLimitResult> {
-  return checkRateLimit(
-    `phone:${phoneNumber}`,
-    OTP_CONFIG.RATE_LIMIT_PHONE_MAX
-  );
-}
+export class RateLimitService {
+  async checkRateLimit(
+    identifier: string,
+    type: "phone" | "ip"
+  ): Promise<RateLimitResult> {
+    const limit = LIMITS[type];
+    const key = `${type}:${identifier}`;
 
-/**
- * Check rate limit for IP address
- */
-export async function checkIPRateLimit(
-  ipAddress: string
-): Promise<RateLimitResult> {
-  return checkRateLimit(`ip:${ipAddress}`, OTP_CONFIG.RATE_LIMIT_IP_MAX);
+    const command = new GetCommand({
+      TableName: RATE_LIMITS_TABLE,
+      Key: { identifier: key },
+    });
+
+    const result = await docClient.send(command);
+    const record = result.Item;
+
+    if (!record) {
+      return { allowed: true };
+    }
+
+    const now = Date.now();
+    const windowStart = new Date(record.windowStart).getTime();
+    const windowEnd = windowStart + limit.windowSeconds * 1000;
+
+    // Check if we're still in the same window
+    if (now < windowEnd) {
+      if (record.count >= limit.max) {
+        const retryAfter = Math.ceil((windowEnd - now) / 1000);
+        return { allowed: false, retryAfter };
+      }
+      return { allowed: true };
+    }
+
+    // Window has expired, allow the request
+    return { allowed: true };
+  }
+
+  async incrementRateLimit(
+    identifier: string,
+    type: "phone" | "ip"
+  ): Promise<void> {
+    const limit = LIMITS[type];
+    const key = `${type}:${identifier}`;
+    const now = new Date().toISOString();
+
+    const getCommand = new GetCommand({
+      TableName: RATE_LIMITS_TABLE,
+      Key: { identifier: key },
+    });
+
+    const result = await docClient.send(getCommand);
+    const record = result.Item;
+
+    if (!record) {
+      // Create new record
+      const putCommand = new PutCommand({
+        TableName: RATE_LIMITS_TABLE,
+        Item: {
+          identifier: key,
+          count: 1,
+          windowStart: now,
+          ttl: Math.floor(Date.now() / 1000) + limit.windowSeconds,
+        },
+      });
+      await docClient.send(putCommand);
+    } else {
+      const windowStart = new Date(record.windowStart).getTime();
+      const windowEnd = windowStart + limit.windowSeconds * 1000;
+
+      if (Date.now() < windowEnd) {
+        // Increment count in current window
+        const updateCommand = new UpdateCommand({
+          TableName: RATE_LIMITS_TABLE,
+          Key: { identifier: key },
+          UpdateExpression: "SET #count = #count + :inc",
+          ExpressionAttributeNames: {
+            "#count": "count",
+          },
+          ExpressionAttributeValues: {
+            ":inc": 1,
+          },
+        });
+        await docClient.send(updateCommand);
+      } else {
+        // Start new window
+        const putCommand = new PutCommand({
+          TableName: RATE_LIMITS_TABLE,
+          Item: {
+            identifier: key,
+            count: 1,
+            windowStart: now,
+            ttl: Math.floor(Date.now() / 1000) + limit.windowSeconds,
+          },
+        });
+        await docClient.send(putCommand);
+      }
+    }
+  }
 }

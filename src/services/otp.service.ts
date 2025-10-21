@@ -1,88 +1,141 @@
-// src/services/otp.service.ts
-import { OTP_CONFIG, OTPVerificationResult } from "../types";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
-  generateOTP,
-  generateUUID,
-  hashOTP,
-  timingSafeEqual,
-} from "../utils/crypto";
-import { Logger } from "../utils/logger";
-import { getOTPBySession, markOTPVerified, storeOTP } from "./dynamodb.service";
-import { OTPRecord } from "../types";
+  DynamoDBDocumentClient,
+  PutCommand,
+  GetCommand,
+  DeleteCommand,
+  UpdateCommand,
+} from "@aws-sdk/lib-dynamodb";
+import * as crypto from "crypto";
 
-const logger = new Logger({ service: "OTPService" });
+const client = new DynamoDBClient({
+  region: process.env.AWS_REGION || "us-west-2",
+});
+const docClient = DynamoDBDocumentClient.from(client);
 
-/**
- * Generate and store OTP for a session
- */
-export async function generateAndStoreOTP(
-  sessionId: string
-): Promise<{ otp: string; otpId: string }> {
-  const otp = generateOTP();
-  const hashedOTP = hashOTP(otp, sessionId);
-  const otpId = generateUUID();
+const RECORDS_TABLE = process.env.RECORDS_TABLE || "sms-otp-records";
+const OTP_LENGTH = 6;
+const OTP_EXPIRY_SECONDS = 300; // 5 minutes
 
-  const otpRecord: OTPRecord = {
-    otpId,
-    sessionId,
-    hashedOTP,
-    createdAt: Date.now(),
-    expiresAt: Date.now() + OTP_CONFIG.OTP_EXPIRY_SECONDS * 1000,
-    verified: false,
-  };
-
-  await storeOTP(otpRecord);
-
-  logger.info("OTP generated and stored", { sessionId, otpId });
-
-  return { otp, otpId };
-}
-
-/**
- * Verify OTP using timing-safe comparison
- */
-export async function verifyOTP(
-  sessionId: string,
-  providedOTP: string
-): Promise<OTPVerificationResult> {
-  logger.info("Verifying OTP", { sessionId });
-
-  // Get stored OTP record
-  const otpRecord = await getOTPBySession(sessionId);
-
-  if (!otpRecord) {
-    logger.warn("No OTP found for session", { sessionId });
-    return { valid: false, reason: "NO_OTP_FOUND" };
+export class OTPService {
+  generateOTP(): string {
+    // Generate a cryptographically secure 6-digit OTP
+    const buffer = crypto.randomBytes(4);
+    const num = buffer.readUInt32BE(0);
+    const otp = (num % 1000000).toString().padStart(OTP_LENGTH, "0");
+    return otp;
   }
 
-  // Check if OTP has expired
-  if (Date.now() > otpRecord.expiresAt) {
-    logger.warn("OTP expired", { sessionId, otpId: otpRecord.otpId });
-    return { valid: false, reason: "OTP_EXPIRED" };
+  hashOTP(otp: string, phoneNumber: string): string {
+    // Hash OTP with phone number as salt for security
+    return crypto
+      .createHmac(
+        "sha256",
+        process.env.OTP_SECRET || "default-secret-change-in-production"
+      )
+      .update(otp + phoneNumber)
+      .digest("hex");
   }
 
-  // Check if already verified
-  if (otpRecord.verified) {
-    logger.warn("OTP already used", { sessionId, otpId: otpRecord.otpId });
-    return { valid: false, reason: "OTP_ALREADY_USED" };
-  }
+  async storeOTP(
+    sessionId: string,
+    phoneNumber: string,
+    otp: string
+  ): Promise<void> {
+    const hashedOTP = this.hashOTP(otp, phoneNumber);
+    const expiresAt = new Date(
+      Date.now() + OTP_EXPIRY_SECONDS * 1000
+    ).toISOString();
 
-  // Hash the provided OTP
-  const providedHash = hashOTP(providedOTP, sessionId);
-
-  // Timing-safe comparison
-  const isValid = timingSafeEqual(providedHash, otpRecord.hashedOTP);
-
-  if (isValid) {
-    // Mark OTP as verified
-    await markOTPVerified(otpRecord.otpId);
-    logger.info("OTP verified successfully", {
-      sessionId,
-      otpId: otpRecord.otpId,
+    const command = new PutCommand({
+      TableName: RECORDS_TABLE,
+      Item: {
+        sessionId, // Primary key
+        phoneNumber,
+        otpHash: hashedOTP,
+        createdAt: new Date().toISOString(),
+        expiresAt,
+        attempts: 0,
+        ttl: Math.floor(Date.now() / 1000) + OTP_EXPIRY_SECONDS,
+      },
     });
-    return { valid: true, otpId: otpRecord.otpId };
-  } else {
-    logger.warn("Invalid OTP provided", { sessionId });
-    return { valid: false, reason: "INVALID_OTP" };
+
+    await docClient.send(command);
+  }
+
+  async verifyOTP(sessionId: string, otp: string): Promise<boolean> {
+    // Get OTP record directly by sessionId (primary key)
+    const command = new GetCommand({
+      TableName: RECORDS_TABLE,
+      Key: { sessionId },
+    });
+
+    const result = await docClient.send(command);
+    const record = result.Item;
+
+    if (!record) {
+      return false;
+    }
+
+    // Check if OTP has expired
+    if (new Date(record.expiresAt) < new Date()) {
+      await this.deleteOTP(sessionId);
+      return false;
+    }
+
+    // Check if too many attempts
+    if (record.attempts >= 3) {
+      await this.deleteOTP(sessionId);
+      return false;
+    }
+
+    // Verify OTP using timing-safe comparison
+    const hashedInput = this.hashOTP(otp, record.phoneNumber);
+
+    // Make sure both buffers are the same length
+    if (hashedInput.length !== record.otpHash.length) {
+      await this.incrementAttempts(sessionId, record.attempts);
+      return false;
+    }
+
+    const isValid = crypto.timingSafeEqual(
+      Buffer.from(hashedInput),
+      Buffer.from(record.otpHash)
+    );
+
+    if (isValid) {
+      // Delete OTP after successful verification
+      await this.deleteOTP(sessionId);
+      return true;
+    } else {
+      // Increment attempt counter
+      await this.incrementAttempts(sessionId, record.attempts);
+      return false;
+    }
+  }
+
+  private async incrementAttempts(
+    sessionId: string,
+    currentAttempts: number
+  ): Promise<void> {
+    const command = new UpdateCommand({
+      TableName: RECORDS_TABLE,
+      Key: { sessionId }, // Use sessionId as key
+      UpdateExpression: "SET attempts = :attempts",
+      ExpressionAttributeValues: {
+        ":attempts": currentAttempts + 1,
+      },
+    });
+
+    await docClient.send(command);
+  }
+
+  private async deleteOTP(sessionId: string): Promise<void> {
+    const command = new DeleteCommand({
+      TableName: RECORDS_TABLE,
+      Key: { sessionId }, // Use sessionId as key
+    });
+
+    await docClient.send(command);
   }
 }

@@ -1,167 +1,156 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: SMS OTP Authentication - Lambda Functions Only
+Description: SMS OTP Authentication System - Lambda Functions Only
 
 Parameters:
   TwilioAccountSid:
     Type: String
     Description: Twilio Account SID
+    Default: AC6510cade2d7d758b5f6a2d7902bd89e3
+
   TwilioAuthToken:
     Type: String
-    NoEcho: true
     Description: Twilio Auth Token
+    NoEcho: true
+    Default: YOUR_TWILIO_AUTH_TOKEN_HERE
+
   TwilioPhoneNumber:
     Type: String
     Description: Twilio Phone Number
-  StaticQRAppId:
-    Type: String
-    Default: my-app
-  StaticQRSecret:
-    Type: String
-    NoEcho: true
-    Default: dGhpc21zc3RhdGljc2VjcmV0
-  LambdaRoleArn:
-    Type: String
-    Description: ARN of existing Lambda execution role
-    Default: arn:aws:iam::082800993317:role/sms-otp-lambda-execution-role
-  SQSQueueUrl:
-    Type: String
-    Description: URL of existing SQS queue
-    Default: https://sqs.us-west-2.amazonaws.com/082800993317/sms-otp-sms-delivery
+    Default: +15855801246
 
 Globals:
   Function:
-    Timeout: 30
     Runtime: nodejs20.x
+    Timeout: 30
     MemorySize: 512
     Environment:
       Variables:
-        DYNAMODB_SESSIONS_TABLE: sms-otp-sessions
-        DYNAMODB_OTP_RECORDS_TABLE: sms-otp-records
-        DYNAMODB_RATE_LIMITS_TABLE: sms-otp-rate-limits
-        DYNAMODB_AUDIT_LOGS_TABLE: sms-otp-audit-logs
-        SQS_SMS_DELIVERY_URL: !Ref SQSQueueUrl
-        OTP_EXPIRY_SECONDS: "600"
-        SESSION_EXPIRY_SECONDS: "600"
-        OTP_MAX_ATTEMPTS: "3"
-        RATE_LIMIT_PHONE_MAX: "5"
-        RATE_LIMIT_IP_MAX: "20"
-        RATE_LIMIT_WINDOW_SECONDS: "3600"
+        DEBUG_LOGGING: "true"
+        SESSIONS_TABLE: sms-otp-sessions
+        RECORDS_TABLE: sms-otp-records
+        RATE_LIMITS_TABLE: sms-otp-rate-limits
+        AUDIT_LOGS_TABLE: sms-otp-audit-logs
+        SMS_QUEUE_URL: !Sub "https://sqs.${AWS::Region}.amazonaws.com/${AWS::AccountId}/sms-otp-sms-delivery"
+        EVENTS_QUEUE_URL: !Sub "https://sqs.${AWS::Region}.amazonaws.com/${AWS::AccountId}/sms-otp-events"
+        TWILIO_ACCOUNT_SID: !Ref TwilioAccountSid
+        TWILIO_AUTH_TOKEN: !Ref TwilioAuthToken
+        TWILIO_PHONE_NUMBER: !Ref TwilioPhoneNumber
 
 Resources:
-  # API Gateway
-  ApiGateway:
-    Type: AWS::Serverless::Api
-    Properties:
-      Name: sms-otp-api-prod
-      StageName: prod
-      Cors:
-        AllowMethods: "'POST, GET, OPTIONS'"
-        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
-        AllowOrigin: "'*'"
-
-  # Lambda Functions
   ValidateQRFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: sms-otp-validate-qr-prod
-      CodeUri: dist/
-      Handler: lambdas/validate-qr.handler
-      Role: !Ref LambdaRoleArn
-      Environment:
-        Variables:
-          STATIC_QR_APP_ID: !Ref StaticQRAppId
-          STATIC_QR_SECRET: !Ref StaticQRSecret
+      FunctionName: validate-qr
+      CodeUri: .
+      Handler: dist/lambdas/validate-qr.handler
+      Role: arn:aws:iam::082800993317:role/sms-otp-lambda-execution-role
       Events:
-        ApiEvent:
-          Type: Api
+        ValidateQR:
+          Type: HttpApi
           Properties:
             Path: /validate-qr
-            Method: POST
-            RestApiId: !Ref ApiGateway
+            Method: post
+            ApiId: !Ref HttpApi
 
   RequestOTPFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: sms-otp-request-otp-prod
-      CodeUri: dist/
-      Handler: lambdas/request-otp.handler
-      Role: !Ref LambdaRoleArn
+      FunctionName: request-otp
+      CodeUri: .
+      Handler: dist/lambdas/request-otp.handler
+      Role: arn:aws:iam::082800993317:role/sms-otp-lambda-execution-role
       Events:
-        ApiEvent:
-          Type: Api
+        RequestOTP:
+          Type: HttpApi
           Properties:
             Path: /request-otp
-            Method: POST
-            RestApiId: !Ref ApiGateway
+            Method: post
+            ApiId: !Ref HttpApi
 
   VerifyOTPFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: sms-otp-verify-otp-prod
-      CodeUri: dist/
-      Handler: lambdas/verify-otp.handler
-      Role: !Ref LambdaRoleArn
+      FunctionName: verify-otp
+      CodeUri: .
+      Handler: dist/lambdas/verify-otp.handler
+      Role: arn:aws:iam::082800993317:role/sms-otp-lambda-execution-role
       Events:
-        ApiEvent:
-          Type: Api
+        VerifyOTP:
+          Type: HttpApi
           Properties:
             Path: /verify-otp
-            Method: POST
-            RestApiId: !Ref ApiGateway
+            Method: post
+            ApiId: !Ref HttpApi
 
   SMSSenderFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: sms-otp-sms-sender-prod
-      CodeUri: dist/
-      Handler: lambdas/sms-sender.handler
-      Role: !Ref LambdaRoleArn
-      Environment:
-        Variables:
-          TWILIO_ACCOUNT_SID: !Ref TwilioAccountSid
-          TWILIO_AUTH_TOKEN: !Ref TwilioAuthToken
-          TWILIO_PHONE_NUMBER: !Ref TwilioPhoneNumber
-
-  # Event Source Mapping for SQS
-  SMSSenderEventSourceMapping:
-    Type: AWS::Lambda::EventSourceMapping
-    Properties:
-      EventSourceArn: !Sub "arn:aws:sqs:${AWS::Region}:082800993317:sms-otp-sms-delivery"
-      FunctionName: !Ref SMSSenderFunction
-      BatchSize: 10
-
-Outputs:
-  ApiUrl:
-    Description: API Gateway endpoint URL
-    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/"
-
-  ValidateQREndpoint:
-    Description: Validate QR endpoint
-    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/validate-qr"
-
-  RequestOTPEndpoint:
-    Description: Request OTP endpoint
-    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/request-otp"
-
-  VerifyOTPEndpoint:
-    Description: Verify OTP endpoint
-    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/verify-otp"
+      FunctionName: sms-sender
+      CodeUri: .
+      Handler: dist/lambdas/sms-sender.handler
+      Role: arn:aws:iam::082800993317:role/sms-otp-lambda-execution-role
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:sms-otp-sms-delivery"
+            BatchSize: 10
 
   TwilioWebhookFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: sms-otp-twilio-webhook-prod
-      CodeUri: dist/
-      Handler: lambdas/twilio-webhook.handler
+      FunctionName: twilio-webhook
+      CodeUri: .
+      Handler: dist/lambdas/twilio-webhook.handler
       Role: arn:aws:iam::082800993317:role/sms-otp-lambda-execution-role
-      Environment:
-        Variables:
-          DYNAMODB_OTP_RECORDS_TABLE: sms-otp-records
       Events:
-        WebhookApi:
-          Type: Api
+        TwilioWebhook:
+          Type: HttpApi
           Properties:
-            RestApiId: !Ref ApiGateway
             Path: /twilio-webhook
-            Method: POST
+            Method: post
+            ApiId: !Ref HttpApi
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: prod
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowHeaders:
+          - Content-Type
+          - X-Amz-Date
+          - Authorization
+          - X-Api-Key
+          - X-Amz-Security-Token
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        MaxAge: 300
+        AllowCredentials: false
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+
+  ValidateQRUrl:
+    Description: Validate QR endpoint
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/validate-qr"
+
+  RequestOTPUrl:
+    Description: Request OTP endpoint
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/request-otp"
+
+  VerifyOTPUrl:
+    Description: Verify OTP endpoint
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/verify-otp"
+
+  TwilioWebhookUrl:
+    Description: Twilio Webhook URL
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/twilio-webhook"

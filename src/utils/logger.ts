@@ -1,51 +1,51 @@
 // src/utils/logger.ts
 
+interface LoggerOptions {
+  lambda: string;
+}
+
 /**
  * Simple structured logger for Lambda functions
- * In production, consider using AWS Lambda Powertools
  */
 export class Logger {
-  private context: Record<string, any> = {};
+  private lambda: string;
 
-  constructor(context?: Record<string, any>) {
-    this.context = context || {};
+  constructor(options: LoggerOptions) {
+    this.lambda = options.lambda;
   }
 
-  private log(level: string, message: string, meta?: Record<string, any>) {
+  info(message: string, data?: any): void {
+    this.log("INFO", message, data);
+  }
+
+  error(message: string, error: Error, data?: any): void {
+    this.log("ERROR", message, {
+      error: {
+        message: error.message,
+        stack: error.stack,
+        name: error.name,
+      },
+      ...data,
+    });
+  }
+
+  warn(message: string, data?: any): void {
+    this.log("WARN", message, data);
+  }
+
+  private log(level: string, message: string, data?: any): void {
     const logEntry = {
       timestamp: new Date().toISOString(),
       level,
       message,
-      ...this.context,
-      ...meta,
+      lambda: this.lambda,
+      ...data,
     };
-    console.log(JSON.stringify(logEntry));
-  }
 
-  info(message: string, meta?: Record<string, any>) {
-    this.log("INFO", message, meta);
-  }
-
-  warn(message: string, meta?: Record<string, any>) {
-    this.log("WARN", message, meta);
-  }
-
-  error(message: string, error?: Error, meta?: Record<string, any>) {
-    this.log("ERROR", message, {
-      ...meta,
-      error: error
-        ? {
-            message: error.message,
-            stack: error.stack,
-            name: error.name,
-          }
-        : undefined,
-    });
-  }
-
-  debug(message: string, meta?: Record<string, any>) {
-    if (process.env.DEBUG === "true") {
-      this.log("DEBUG", message, meta);
+    if (level === "ERROR") {
+      console.error(JSON.stringify(logEntry));
+    } else {
+      console.log(JSON.stringify(logEntry));
     }
   }
 }
