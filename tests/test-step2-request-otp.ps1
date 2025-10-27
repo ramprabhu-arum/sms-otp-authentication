@@ -7,7 +7,7 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
 
-$sessionId = "f9069f8c-f865-4e50-819f-6c88fd6f0fe0"
+$sessionId = "026c5d4a-982f-475a-99ec-c7c0ea264e11"
 $sessionId = $sessionId.Trim()
 
 Write-Host "Using Session ID: $sessionId" -ForegroundColor Gray

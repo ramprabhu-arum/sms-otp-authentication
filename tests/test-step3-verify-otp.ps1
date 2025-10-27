@@ -8,8 +8,8 @@ Write-Host ""
 
 
 
-$sessionId = "f9069f8c-f865-4e50-819f-6c88fd6f0fe0".Trim()
-$otp = "378314".Trim()
+$sessionId = "c2f299f5-115a-463f-96fd-327714b36760".Trim()
+$otp = "545194".Trim()
 
 Write-Host "Using Session ID: $sessionId" -ForegroundColor Gray
 Write-Host "Using OTP: $otp" -ForegroundColor Gray

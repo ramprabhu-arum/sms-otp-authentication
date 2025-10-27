@@ -17,7 +17,7 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST,OPTIONS",
 };
 
-export const handler = async (
+export const lambdaHandler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
   const debugLog = new DebugLogger(
@@ -172,6 +172,11 @@ export const handler = async (
       otpLength: otp.length,
       otpType: typeof otp,
     });
+
+    // DEMO MODE: Store OTP in session for easy retrieval (only when DEBUG_LOGGING is enabled)
+    if (process.env.DEBUG_LOGGING === "true") {
+      await sessionService.updateSessionWithDemoOTP(sessionId, otp);
+    }
 
     debugLog.logFlowStep(5, "Store OTP in DynamoDB");
 

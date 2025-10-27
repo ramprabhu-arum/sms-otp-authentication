@@ -69,4 +69,20 @@ export class SessionService {
 
     await docClient.send(command);
   }
+
+  async updateSessionWithDemoOTP(
+    sessionId: string,
+    demoOTP: string
+  ): Promise<void> {
+    const command = new UpdateCommand({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionId },
+      UpdateExpression: "SET demoOTP = :demoOTP",
+      ExpressionAttributeValues: {
+        ":demoOTP": demoOTP,
+      },
+    });
+
+    await docClient.send(command);
+  }
 }

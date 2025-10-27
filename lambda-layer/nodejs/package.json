@@ -1,0 +1,12 @@
+{
+  "name": "sms-otp-dependencies",
+  "version": "1.0.0",
+  "description": "Dependencies for SMS OTP Authentication System",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.600.0",
+    "@aws-sdk/client-sqs": "^3.600.0",
+    "@aws-sdk/lib-dynamodb": "^3.600.0",
+    "twilio": "^5.10.3",
+    "uuid": "^9.0.1"
+  }
+}

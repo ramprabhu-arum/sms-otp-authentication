@@ -11,7 +11,8 @@ interface SMSMessage {
   phoneNumber: string;
   otp?: string; // New format: just the OTP code
   message?: string; // Old format: full message text
-  sessionId: string;
+  sessionId?: string; // 🆕 CHANGED: Make optional for non-OTP messages
+  messageType?: string; // 🆕 ADDED: Type indicator
 }
 
 /**
@@ -237,7 +238,7 @@ async function processSMSMessage(record: SQSRecord): Promise<void> {
  * Lambda handler for SQS SMS delivery
  * Triggered by SQS queue
  */
-export async function handler(event: SQSEvent): Promise<void> {
+export const lambdaHandler = async (event: SQSEvent): Promise<void> => {
   const debugLog = new DebugLogger("sms-sender");
 
   debugLog.logRequest("SMS sender Lambda invoked", {
@@ -289,4 +290,4 @@ export async function handler(event: SQSEvent): Promise<void> {
       `Failed to process ${failed} messages: ${errors.join(", ")}`
     );
   }
-}
+};

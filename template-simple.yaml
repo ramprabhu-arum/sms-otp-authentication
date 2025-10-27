@@ -12,7 +12,7 @@ Parameters:
     Type: String
     Description: Twilio Auth Token
     NoEcho: true
-    Default: YOUR_TWILIO_AUTH_TOKEN_HERE
+    Default: a9916d8ef46d887d347b72cdec88d29a
 
   TwilioPhoneNumber:
     Type: String
@@ -21,9 +21,9 @@ Parameters:
 
 Globals:
   Function:
-    Runtime: nodejs20.x
+    Runtime: nodejs18.x
     Timeout: 30
-    MemorySize: 512
+    MemorySize: 256
     Environment:
       Variables:
         DEBUG_LOGGING: "true"
@@ -42,8 +42,8 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: validate-qr
-      CodeUri: .
-      Handler: dist/lambdas/validate-qr.handler
+      CodeUri: dist/validateQR
+      Handler: app.lambdaHandler
       Role: arn:aws:iam::082800993317:role/sms-otp-lambda-execution-role
       Events:
         ValidateQR:
@@ -57,8 +57,8 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: request-otp
-      CodeUri: .
-      Handler: dist/lambdas/request-otp.handler
+      CodeUri: dist/requestOTP
+      Handler: app.lambdaHandler
       Role: arn:aws:iam::082800993317:role/sms-otp-lambda-execution-role
       Events:
         RequestOTP:
@@ -72,8 +72,8 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: verify-otp
-      CodeUri: .
-      Handler: dist/lambdas/verify-otp.handler
+      CodeUri: dist/verifyOTP
+      Handler: app.lambdaHandler
       Role: arn:aws:iam::082800993317:role/sms-otp-lambda-execution-role
       Events:
         VerifyOTP:
@@ -87,8 +87,8 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: sms-sender
-      CodeUri: .
-      Handler: dist/lambdas/sms-sender.handler
+      CodeUri: dist/smsSender
+      Handler: app.lambdaHandler
       Role: arn:aws:iam::082800993317:role/sms-otp-lambda-execution-role
       Events:
         SQSEvent:
@@ -101,14 +101,48 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: twilio-webhook
-      CodeUri: .
-      Handler: dist/lambdas/twilio-webhook.handler
+      CodeUri: dist/twilioWebhook
+      Handler: app.lambdaHandler
       Role: arn:aws:iam::082800993317:role/sms-otp-lambda-execution-role
       Events:
         TwilioWebhook:
           Type: HttpApi
           Properties:
             Path: /twilio-webhook
+            Method: post
+            ApiId: !Ref HttpApi
+
+  # 🆕 NEW: Get OTP Function (for demo/testing purposes)
+  GetOTPFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: get-otp
+      CodeUri: dist/getOTP
+      Handler: app.lambdaHandler
+      Role: arn:aws:iam::082800993317:role/sms-otp-lambda-execution-role
+      Description: Retrieves actual OTP for demo/testing (requires DEBUG_LOGGING=true)
+      Events:
+        GetOTP:
+          Type: HttpApi
+          Properties:
+            Path: /get-otp
+            Method: get
+            ApiId: !Ref HttpApi
+
+  # 🆕 NEW: Check Eligibility Function (discount/offer API)
+  CheckEligibilityFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: check-eligibility
+      CodeUri: dist/checkEligibility
+      Handler: app.lambdaHandler
+      Role: arn:aws:iam::082800993317:role/sms-otp-lambda-execution-role
+      Description: Checks discount eligibility and sends SMS offer via Twilio
+      Events:
+        CheckEligibility:
+          Type: HttpApi
+          Properties:
+            Path: /check-eligibility
             Method: post
             ApiId: !Ref HttpApi
 
@@ -154,3 +188,12 @@ Outputs:
   TwilioWebhookUrl:
     Description: Twilio Webhook URL
     Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/twilio-webhook"
+
+  # 🆕 NEW OUTPUTS
+  GetOTPUrl:
+    Description: Get OTP endpoint (for demo/testing)
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/get-otp"
+
+  CheckEligibilityUrl:
+    Description: Check Eligibility endpoint
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/check-eligibility"
