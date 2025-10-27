@@ -76,24 +76,44 @@ sam-cli (latest)
 ## System Architecture
 
 ### Flow Diagram
-
-\`\`\`mermaid
+```mermaid
 sequenceDiagram
-Client->>API Gateway: 1. POST /validate-qr
-API Gateway->>Lambda: validate-qr
-Lambda->>DynamoDB: Create session
-Lambda->>Client: Return sessionId
-Client->>API Gateway: 2. POST /request-otp
-API Gateway->>Lambda: request-otp
-Lambda->>SQS: Queue SMS
-Lambda->>Client: Success response
-SQS->>Lambda: Trigger sms-sender
-Lambda->>Twilio: Send SMS
-Client->>API Gateway: 3. POST /verify-otp
-Lambda->>DynamoDB: Verify OTP
-Lambda->>Client: Return authToken
-\`\`\`
+    participant Client
+    participant API Gateway
+    participant Lambda
+    participant DynamoDB
+    participant SQS
+    participant Twilio
 
+    Note over Client,Twilio: 1. QR Code Validation
+    Client->>API Gateway: POST /validate-qr
+    API Gateway->>Lambda: validate-qr
+    Lambda->>DynamoDB: Create session
+    DynamoDB-->>Lambda: Session created
+    Lambda-->>API Gateway: Return sessionId
+    API Gateway-->>Client: Return sessionId
+
+    Note over Client,Twilio: 2. OTP Request
+    Client->>API Gateway: POST /request-otp
+    API Gateway->>Lambda: request-otp
+    Lambda->>SQS: Queue SMS message
+    SQS-->>Lambda: Message queued
+    Lambda-->>API Gateway: Success response
+    API Gateway-->>Client: Success response
+    
+    Note over SQS,Twilio: Async SMS Processing
+    SQS->>Lambda: Trigger sms-sender
+    Lambda->>Twilio: Send SMS with OTP
+    Twilio-->>Lambda: SMS sent confirmation
+
+    Note over Client,Twilio: 3. OTP Verification
+    Client->>API Gateway: POST /verify-otp
+    API Gateway->>Lambda: verify-otp
+    Lambda->>DynamoDB: Verify OTP & session
+    DynamoDB-->>Lambda: OTP valid
+    Lambda-->>API Gateway: Return authToken
+    API Gateway-->>Client: Return authToken
+```
 ### Components
 
 - **API Gateway**: REST API endpoints
@@ -147,7 +167,7 @@ Content-Type: application/json
 
 ### Project Structure
 
-\`\`\`
+```
 sms-otp/
 ├── src/
 │ ├── lambdas/ # Lambda function handlers
@@ -157,7 +177,7 @@ sms-otp/
 ├── lambda-layer/ # Shared dependencies
 ├── template.yaml # SAM template
 └── package.json # Project config
-\`\`\`
+```
 
 ### Testing
 
